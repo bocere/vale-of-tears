@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""mangleometer — measure how badly a poem has been mangled.
+
+Compares each poem against its pristine copy in originals/ and reports
+one of: sad face, small tears, weeping, bawling.
+
+Usage:
+    ./mangleometer                 # every *.md in the current directory
+    ./mangleometer poem.md ...     # specific poems
+    ./mangleometer -o DIR ...      # originals live somewhere else
+    ./mangleometer -v ...          # also show each changed word
+"""
+import argparse
+import difflib
+import re
+import sys
+from pathlib import Path
+
+# (upper bound on mangle score, label, face)
+LEVELS = [
+    (0.02, "sad face", "🙁"),
+    (0.06, "small tears", "🥲"),
+    (0.12, "weeping", "😢"),
+    (float("inf"), "bawling", "😭"),
+]
+
+TOKEN = re.compile(r"\w+(?:['’]\w+)*|[^\w\s]")
+
+
+def tokens(text):
+    # Treat curly and straight apostrophes the same; keep line breaks as
+    # tokens so joining or splitting lines counts as damage.
+    text = text.replace("’", "'").replace("‘", "'")
+    out = []
+    for line in text.strip().split("\n"):
+        out.extend(TOKEN.findall(line))
+        out.append("⏎")
+    return out
+
+
+def measure(original, mangled):
+    """Return (score 0..1, list of changes). Score = share of the poem's
+    tokens that were deleted, inserted or replaced."""
+    a, b = tokens(original), tokens(mangled)
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    damaged, changes = 0, []
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        damaged += max(i2 - i1, j2 - j1)
+        changes.append((" ".join(a[i1:i2]) or "∅", " ".join(b[j1:j2]) or "∅"))
+    return damaged / max(len(a), 1), changes
+
+
+def verdict(score):
+    for limit, label, face in LEVELS:
+        if score < limit:
+            return label, face
+
+
+def main():
+    p = argparse.ArgumentParser(description="Measure how mangled a poem is.")
+    p.add_argument("poems", nargs="*", type=Path)
+    p.add_argument("-o", "--originals", type=Path, default=Path("originals"))
+    p.add_argument("-v", "--verbose", action="store_true")
+    args = p.parse_args()
+
+    poems = args.poems or sorted(Path(".").glob("*.md"))
+    if not poems:
+        sys.exit("mangleometer: no poems found")
+
+    width = max(len(x.stem) for x in poems)
+    total_score = []
+    for poem in poems:
+        orig = args.originals / poem.name
+        if not orig.exists():
+            print(f"{poem.stem:<{width}}  ??? (no original at {orig})")
+            continue
+        score, changes = measure(orig.read_text(encoding="utf-8"),
+                                 poem.read_text(encoding="utf-8"))
+        total_score.append(score)
+        label, face = verdict(score)
+        print(f"{poem.stem:<{width}}  {score:6.1%}  {face}  {label}"
+              f"  ({len(changes)} change{'s' * (len(changes) != 1)})")
+        if args.verbose:
+            for old, new in changes:
+                print(f"{'':<{width}}      {old.replace('⏎', '↵')!r} → "
+                      f"{new.replace('⏎', '↵')!r}")
+
+    if len(total_score) > 1:
+        avg = sum(total_score) / len(total_score)
+        label, face = verdict(avg)
+        print(f"\n{'OVERALL':<{width}}  {avg:6.1%}  {face}  {label}")
+
+
+if __name__ == "__main__":
+    main()
